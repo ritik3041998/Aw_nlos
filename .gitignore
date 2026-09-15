@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ipynb_checkpoints/
+.DS_Store
+
+# Regenerable and bulky (embeds the full transient cube); rerun run_steps.py to rebuild
+results/*.npz
