@@ -105,6 +105,62 @@ def load_scene(scene, downsample=2, z_trim=600, dtype=np.float32):
                      meta["snr"])
 
 
+def load_mat(path, width=None, bin_ps=4.0, z_offset=0, diffuse=False, snr=0.8,
+             data_key=None, width_key="width", downsample=2, z_trim=600,
+             dtype=np.float32):
+    """Load an arbitrary confocal .mat capture, not one of the registered scenes.
+
+    The cube must be (N, N, M): two wall-scan axes and one time axis, in photon
+    counts, pre-rectified so the direct component starts at the first time bin.
+
+    data_key picks the variable holding the cube; when omitted, the only 3D array
+    in the file is used. width is the half-extent of the scanned wall patch in
+    metres, read from the file when it carries one. bin_ps is the NATIVE bin
+    resolution before downsampling.
+    """
+    mat = sio.loadmat(path)
+
+    if data_key is None:
+        cubes = [k for k, v in mat.items()
+                 if not k.startswith("__") and getattr(v, "ndim", 0) == 3]
+        if len(cubes) != 1:
+            raise KeyError(
+                f"pass data_key: expected exactly one 3D array in {path}, found "
+                f"{cubes or 'none'}")
+        data_key = cubes[0]
+    if data_key not in mat:
+        raise KeyError(f"{data_key!r} not in {path}; keys: "
+                       f"{[k for k in mat if not k.startswith('__')]}")
+
+    data = np.ascontiguousarray(mat[data_key]).astype(dtype)
+    if data.ndim != 3:
+        raise ValueError(f"{data_key!r} has shape {data.shape}, expected 3 axes")
+    if data.shape[0] != data.shape[1]:
+        raise ValueError(f"expected a square scan grid, got {data.shape[:2]}")
+
+    if width is None:
+        if width_key not in mat:
+            raise KeyError(f"no {width_key!r} in {path}: pass width explicitly "
+                           "(the wall patch half-extent, in metres)")
+        width = float(np.asarray(mat[width_key]).squeeze())
+
+    bin_resolution = float(bin_ps) * 1e-12
+    for _ in range(downsample):
+        # Pairwise sum preserves total photon counts, so Poisson statistics survive.
+        if data.shape[2] % 2:
+            data = data[:, :, :-1]
+        data = data[:, :, 0::2] + data[:, :, 1::2]
+        bin_resolution *= 2
+        z_trim = int(round(z_trim / 2))
+        z_offset = int(round(z_offset / 2))
+
+    if z_trim > 0:
+        data[:, :, :z_trim] = 0
+
+    name = Path(path).stem
+    return Transient(data, width, bin_resolution, z_offset, diffuse, name, snr)
+
+
 def signal_support(cube, z_trim_bins=0):
     """Index of the first and last time bin carrying appreciable signal.
 
