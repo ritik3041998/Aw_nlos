@@ -7,3 +7,13 @@ venv/
 
 # Regenerable and bulky (embeds the full transient cube); rerun run_steps.py to rebuild
 results/*.npz
+
+# Stage dumps embed full transient cubes; rerun visualize_steps.py to rebuild
+results/**/*.npz
+
+# Development-tree layout: this repo ships the captures flat in data/
+data/mat_files/
+data/extracted/
+
+# Third-party papers are not redistributed here
+*.pdf

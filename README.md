@@ -1,24 +1,101 @@
-# AW-NLOS — Steps (a)–(c)
+# AW-NLOS — Python reimplementation
 
-A Python implementation of the first three stages of **adaptive windowing non-line-of-sight (AW-NLOS) imaging**:
+A Python implementation of **adaptive windowing non-line-of-sight (AW-NLOS) imaging**:
 
 > Jinye Miao, Fuyao Cai, Taotao Qin, Lianfa Bai, Enlai Guo, Yingjie Shi, Jing Han.
 > *"Adaptive windowing for photon-efficient non-line-of-sight imaging under high ambient light."*
 > **Optics Express** 33(21), 44522 (2025). [doi:10.1364/OE.575419](https://doi.org/10.1364/OE.575419)
 
-This package covers steps **(a)**, **(b)** and **(c)** of the paper's Fig. 3 pipeline — everything needed to compute the **adaptive window width** for every scan point. It deliberately stops before the window is applied.
+The repository holds **two packages**, both on the paper's Fig. 3 pipeline.
 
 ```
-(a) acquire 3D transient cube          ✅ implemented
-(b) 4×4 pixel-block aggregation        ✅ implemented
-(c) matched filtering → window width   ✅ implemented
-─────────────────────────────────────────────────────
-(d) apply window in the time domain    ❌ not included
-(e) TV transient completion            ❌ not included
-(f) LCT reconstruction                 ❌ not included
+                                       aw_nlos/   aw/
+(a) acquire 3D transient cube             yes     yes
+(b) 4x4 pixel-block aggregation           yes     yes
+(c) matched filtering -> window width     yes     yes
+(d) apply window in the time domain        -      yes
+(e) TV transient completion                -      yes
+(f) LCT reconstruction (Wiener)            -      yes
 ```
 
-The output is `window_widths.npz`, which is the handoff to step (d).
+- **`aw_nlos/`** — steps (a)–(c) only, documented in depth below. Stops at the window width and writes `window_widths.npz`. Read this first to understand how the window is sized.
+- **`aw/`** — the full pipeline through reconstruction, plus the comparison experiments and every figure in `results/`. See **The full pipeline** immediately below.
+
+Neither package imports the other; they are independent and can be read separately.
+
+---
+
+## The full pipeline — `aw/`
+
+`aw/` carries steps (a)–(c) through to a reconstructed volume: the window is applied to the raw counts (d), the holes are repaired with spatial TV (e), and the result is inverted with a Python port of the O'Toole Light Cone Transform (f).
+
+```
+aw/io_utils.py   (a) loading, downsampling, direct-component removal
+aw/degrade.py        binomial thinning + Poisson ambient injection
+aw/irf.py            synthesized Gaussian IRF
+aw/window.py     (b) Eq. 4, (c) Eqs. 5-7, (d) Eq. 8
+aw/tv.py         (e) Eqs. 9-10, isotropic spatial TV
+aw/lct.py        (f) Eqs. 11-13, LCT + Wiener deconvolution
+aw/metrics.py        SBR, PPP, SSIM, PSNR, display scaling
+```
+
+### The four experiments
+
+```bash
+python visualize_progressive.py --scene mannequin      # SSIM after each step
+python run_experiment.py        --scene mannequin      # vs 3 gating baselines
+python compare_clean_vs_noisy.py                       # what the algorithm costs
+python compare_methods.py                              # method x data matrix
+```
+
+All four default to **PPP 60, SBR 4.0** and write into `results/`.
+
+**`visualize_progressive.py`** reconstructs after every step and scores it. On `mannequin` the cumulative chain runs 0.588 (degraded) -> 0.607 (windowed) -> **0.736** (TV completed).
+
+**`run_experiment.py`** compares AW-NLOS against no window, a fixed 2x-jitter window and a global window, at three ambient levels. AW-NLOS wins at every level and stays nearly flat while the baselines fall:
+
+| SBR | No window | Fixed 2x | Global | **AW-NLOS** |
+|---|---|---|---|---|
+| 4.04 | 0.588 | 0.624 | 0.584 | **0.736** |
+| 3.32 | 0.572 | 0.624 | 0.570 | **0.734** |
+| 2.94 | 0.528 | 0.616 | 0.538 | **0.733** |
+
+**`compare_clean_vs_noisy.py`** adds the control the sweep never shows: the algorithm run on *undegraded* data. Windowing and TV are lossy operations, so this measures what they cost when there is no noise to remove — 0.05 to 0.34 SSIM depending on the scene. That cost is also the ceiling for the noisy case.
+
+**`compare_methods.py`** lays the same four reconstructions out as a method x data matrix and reports both SSIM and PSNR:
+
+|  | Raw capture | Noisy capture |
+|---|---|---|
+| Traditional LCT | reference | A |
+| AW-NLOS + LCT | B | C |
+
+From it, the robustness measure — how far each method falls when the same noise is added:
+
+| scene | traditional drop | AW-NLOS drop |
+|---|---|---|
+| s_u | 0.225 | **0.012** |
+| mannequin | 0.412 | **0.016** |
+| diffuse_s | 0.497 | **0.018** |
+| dot_chart_40cm | 0.465 | **0.122** |
+| dot_chart_65cm | 0.572 | **0.139** |
+| outdoor_s | 0.467 | **0.143** |
+| resolution_chart_40cm | 0.614 | **0.169** |
+| exit_sign | 0.641 | **0.214** |
+| resolution_chart_65cm | 0.731 | **0.240** |
+
+**AW-NLOS loses less on all nine scenes, by 2.7x to 28x.** This is a fairer statement than the absolute SSIM gap, because AW-NLOS starts from B < 1 rather than from the reference itself.
+
+### What these results do not show
+
+- **The noise is milder than the paper's regime.** These runs sit near 60 signal PPP; the paper targets 0.02–2 PPP. This is an easier problem.
+- **One scene regresses.** On `s_u` the clean SBR is 9.9, so windowing and TV cost more than the noise they remove: 0.717 against 0.775 for no windowing at all. The method is a low-SBR tool, not a general improvement.
+- **Achieved SBR overshoots the target by about 25%.** The ambient rate is solved from the pre-ambient peak, but adding background raises the measured peak too.
+- **The ground truth is itself a reconstruction,** not a CAD model — its own SBR is only 4 to 10.
+- **Window duty differs between conditions.** The window sizes itself from the measured noise floor, so the clean and noisy runs do not share an identical window.
+
+### Scene choice matters for the ground truth
+
+`diffuse_s` reconstructs as a blurry blob at any Wiener parameter — that is intrinsic to the LCT on a diffuse target, not a tuning problem (see `results/gt_quality.png`). For a legible ground truth use `mannequin`, `resolution_chart_40cm`, `dot_chart_40cm` or `exit_sign`.
 
 ---
 
@@ -73,7 +150,7 @@ Widths are clamped to `[T_min, T_max]`, with `T_min = 2×FWHM` (the classical fi
 Python 3.9+.
 
 ```bash
-pip install -r requirements.txt     # numpy, scipy, matplotlib
+pip install -r requirements.txt     # numpy, scipy, matplotlib, scikit-image
 ```
 
 No MATLAB required. No GPU required. A full run takes a few seconds.
@@ -242,17 +319,37 @@ The paper suggests an iterative fix: reconstruct the dominant object, subtract i
 .
 ├── README.md
 ├── requirements.txt
-├── run_steps.py              driver: runs (a)→(c), one figure per step + npz
-├── visualize.py              combined overview sheet + Eq. 6 adaptivity sweep
-├── aw_nlos/
-│   ├── io_utils.py           (a) loading, downsampling, direct-component removal
-│   ├── degrade.py            thinning + ambient injection
-│   ├── irf.py                synthesized Gaussian IRF
-│   ├── window.py             (b) Eq. 4, (c) Eqs. 5–7     ← the core
-│   ├── plotting.py           reusable figure building blocks
-│   └── metrics.py            SBR (Eq. 14), PPP (Eq. 16), display scaling
-├── data/                     .mat captures (included)
-└── results/                  generated figures and window_widths.npz
+│
+├── run_steps.py                    (a)->(c) driver, one figure per step + npz
+├── visualize.py                    overview sheet + Eq. 6 adaptivity sweep
+├── aw_nlos/                        steps (a)-(c) package
+│   ├── io_utils.py                 (a) loading, downsampling, trim
+│   ├── degrade.py                  thinning + ambient injection
+│   ├── irf.py                      synthesized Gaussian IRF
+│   ├── window.py                   (b) Eq. 4, (c) Eqs. 5-7     <- the core
+│   ├── plotting.py                 reusable figure building blocks
+│   └── metrics.py                  SBR (Eq. 14), PPP (Eq. 16)
+│
+├── aw/                             full pipeline (a)-(f)
+│   ├── io_utils.py  degrade.py  irf.py  metrics.py
+│   ├── window.py                   (b) (c) (d)
+│   ├── tv.py                       (e) spatial TV completion
+│   └── lct.py                      (f) LCT + Wiener
+├── visualize_progressive.py        SSIM after each step
+├── visualize_steps.py              per-step diagnostic sheets
+├── run_experiment.py               AW-NLOS vs 3 gating baselines
+├── compare_clean_vs_noisy.py       what the algorithm costs on clean data
+├── compare_methods.py              method x data matrix, SSIM + PSNR
+├── check_phase0.py  check_phase12.py  probe_regime.py  probe_scenes.py
+│
+├── data/                           .mat captures (included)
+└── results/
+    ├── 01_..03_*.png  overview_steps_abc.png  width_vs_sbr.png    (a)-(c)
+    ├── progressive/<scene>/        step-by-step reconstructions
+    ├── steps/<scene>/              per-step diagnostic sheets
+    ├── clean_vs_noisy/             algorithm on clean vs degraded data
+    ├── method_matrix/              traditional vs AW-NLOS, raw vs noisy
+    └── aw_nlos_sweep_<scene>.png   ambient sweeps
 ```
 
 ## License
