@@ -25,6 +25,34 @@ Neither package imports the other; they are independent and can be read separate
 
 ---
 
+## Quickstart
+
+```bash
+git clone https://github.com/ritik3041998/Aw_nlos.git
+cd Aw_nlos
+pip install -r requirements.txt
+python run_single.py data/data_mannequin.mat --aw-only --z-offset 300
+```
+
+Python 3.9+. No MATLAB, no GPU. That run takes about 7 seconds and writes
+
+```
+results/single/data_mannequin_aw.png     Front, Top and Side projections
+results/single/data_mannequin_aw.mat     the reconstructed volume + metadata
+```
+
+If both appear, the install is good. To run it on a capture of your own:
+
+```bash
+python run_single.py path/to/your_data.mat --aw-only
+```
+
+See [Running it on your own capture](#running-it-on-your-own-capture) for the
+flags a different rig usually needs — `--fwhm-ps` and `--z-trim` are the two
+most likely to be wrong, since their defaults describe the O'Toole system.
+
+---
+
 ## The full pipeline — `aw/`
 
 `aw/` carries steps (a)–(c) through to a reconstructed volume: the window is applied to the raw counts (d), the holes are repaired with spatial TV (e), and the result is inverted with a Python port of the O'Toole Light Cone Transform (f).
