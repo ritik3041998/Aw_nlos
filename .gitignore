@@ -17,3 +17,6 @@ data/extracted/
 
 # Third-party papers are not redistributed here
 *.pdf
+
+# run_single.py writes reconstructed volumes here; regenerable and several MB each
+results/single/*.mat

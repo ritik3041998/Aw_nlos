@@ -53,19 +53,54 @@ python run_single.py path/to/capture.mat --width 0.35
 from the file when it carries a `width` variable. The cube is auto-detected when
 the file holds exactly one 3D array; otherwise pass `--data-key`.
 
-Two modes:
+Three modes:
 
 ```bash
+# just reconstruct through AW-NLOS -- no comparison, no added noise
+python run_single.py capture.mat --width 0.35 --aw-only
+
+# real low-SBR capture that already carries ambient noise: no degradation,
+# compared against a traditional LCT reconstruction of the same cube
+python run_single.py capture.mat --width 0.35 --no-degrade
+
 # clean lab capture: degrade it synthetically, reconstruct four ways
 python run_single.py capture.mat --width 0.35 --ppp 60 --sbr 4.0
-
-# real low-SBR capture that already carries ambient noise: no degradation
-python run_single.py capture.mat --width 0.35 --no-degrade
 ```
 
-The first writes a 2x2 matrix (traditional LCT and AW-NLOS, each on the raw and
-the degraded cube); the second writes traditional LCT against AW-NLOS on the
-capture as given. Both land in `results/single/<filename>.png`.
+`--aw-only` is the one to use when you simply have a transient and want its
+AW-NLOS reconstruction. The other two add a traditional-LCT reconstruction to
+compare against, and the third also adds synthetic ambient noise.
+
+### What a run writes
+
+Each run writes a PNG and a `.mat` into `results/single/`:
+
+```
+results/single/<name>_aw.png     Front, Top and Side projections
+results/single/<name>_aw.mat     the reconstructed volume and its metadata
+```
+
+The `.mat` holds one `(depth, y, x)` float32 albedo volume per reconstruction,
+its three projections, and enough metadata to interpret them:
+
+| Variable | Meaning |
+|---|---|
+| `aw_nlos` | the reconstructed volume, axes **(depth, y, x)** |
+| `aw_nlos_front` / `_top` / `_side` | maximum-intensity projections |
+| `width`, `bin_resolution`, `z_offset`, `diffuse`, `snr` | geometry and reconstruction settings |
+| `input_sbr`, `input_ppp` | photon statistics of the capture as loaded |
+| `window_width_ps`, `window_duty` | the adaptive window that was applied |
+
+In `--no-degrade` and default mode the volumes are named by panel
+(`aw_nlos_raw`, `traditional_raw`, `aw_nlos_noisy`, `traditional_noisy`), and
+the degradation parameters (`degrade_alpha`, `degrade_ambient_rate`,
+`degraded_sbr`, `degraded_ppp`) are written too, so a run is reproducible from
+the file alone.
+
+Note the axis order is **(depth, y, x)**, which is what the LCT port works in
+internally, not MATLAB's usual (x, y, z). Permute on load if you need the other
+convention. Pass `--no-mat` to write only the PNG; the volumes run several MB
+and are gitignored.
 
 **What your capture must look like.** A `(N, N, M)` array of photon counts:
 two wall-scan axes, square, and one TCSPC time axis, pre-rectified so the direct
@@ -82,6 +117,7 @@ component starts at the first time bin.
 | `--z-offset` | `0` | The object sits deep and the crop cuts it off |
 | `--diffuse` | off | The target is diffuse, not retroreflective |
 | `--data-key` | auto | The file holds more than one 3D array |
+| `--no-mat` | off | You want only the PNG, not the volume export |
 
 If the run prints `WARNING: no signal measured above the background estimate`,
 raise `--z-trim` first: the direct wall bounce is probably still in the cube and

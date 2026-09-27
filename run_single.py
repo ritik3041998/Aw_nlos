@@ -4,16 +4,20 @@ The other drivers only accept `--scene`, a name from the table of bundled
 captures in aw/io_utils.py. This one takes any .mat cube, so it is the entry
 point for testing on your own data.
 
-Two modes:
+Three modes:
+
+  --aw-only      just reconstruct the capture through AW-NLOS. No degradation,
+                 no comparison, no scores -- one figure, three views. This is
+                 the mode for "I have a transient, show me the reconstruction".
+
+  --no-degrade   reconstruct the capture as given, two ways: traditional LCT
+                 and AW-NLOS. Use this on a real low-SBR capture that already
+                 carries its own ambient noise.
 
   default        degrade the capture synthetically, then reconstruct it four
                  ways: traditional LCT and AW-NLOS, each on the raw and the
                  degraded cube. Use this on a clean lab capture to see what
                  the method buys under simulated ambient light.
-
-  --no-degrade   skip degradation and reconstruct the capture as given, two
-                 ways: traditional LCT and AW-NLOS. Use this on a real
-                 low-SBR capture that already carries its own ambient noise.
 """
 
 import argparse
@@ -24,6 +28,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.io as sio
 
 from aw import degrade, lct, metrics, tv, window
 from aw.io_utils import load_mat
@@ -32,7 +37,13 @@ VIEWS = ("Front", "Top", "Side")
 
 
 def render(transient):
-    return lct.projections(lct.crop_for_display(lct.reconstruct(transient), transient))
+    """Reconstruct and return (volume, (front, top, side)).
+
+    The volume is the cropped albedo grid the projections are taken from, kept so
+    it can be written out alongside the figure.
+    """
+    vol = lct.crop_for_display(lct.reconstruct(transient), transient)
+    return vol, lct.projections(vol)
 
 
 def apply_algorithm(transient, fwhm_s, mu, block, z_trim):
@@ -45,7 +56,7 @@ def save(panels, title, stats, path):
     """One row of labelled panels per view."""
     n = len(panels)
     fig, ax = plt.subplots(3, n, figsize=(4.6 * n, 9.6), squeeze=False)
-    for c, (views, label, score) in enumerate(panels):
+    for c, (views, label, tag) in enumerate(panels):
         for r in range(3):
             ax[r][c].imshow(metrics.to_display(views[r]), cmap="gray")
             ax[r][c].set_xticks([])
@@ -53,17 +64,47 @@ def save(panels, title, stats, path):
             if c == 0:
                 ax[r][c].set_ylabel(VIEWS[r], fontsize=12)
         ax[0][c].set_title(label, fontsize=12)
-        tag = "reference" if score is None else f"SSIM {score[0]:.4f}   PSNR {score[1]:.1f} dB"
-        ax[2][c].text(0.5, 0.015, tag, transform=ax[2][c].transAxes,
-                      ha="center", va="bottom", fontsize=13, color="white",
-                      fontweight="bold",
-                      bbox=dict(facecolor="black", alpha=0.72, pad=5,
-                                edgecolor="white", linewidth=0.6))
+        # tag is None when there is nothing to score against, as in --aw-only.
+        if tag:
+            ax[2][c].text(0.5, 0.015, tag, transform=ax[2][c].transAxes,
+                          ha="center", va="bottom", fontsize=13, color="white",
+                          fontweight="bold",
+                          bbox=dict(facecolor="black", alpha=0.72, pad=5,
+                                    edgecolor="white", linewidth=0.6))
     fig.suptitle(title, fontsize=14)
     fig.text(0.5, 0.945, stats, ha="center", fontsize=9, color="dimgray")
     fig.tight_layout(rect=[0, 0, 1, 0.935], h_pad=2.0)
     fig.savefig(path, dpi=130)
     plt.close(fig)
+
+
+def save_mat(path, volumes, cap, diag, stats_in, extra=None):
+    """Write the reconstructed volumes and the metadata needed to interpret them.
+
+    Each entry of `volumes` becomes one variable holding a (depth, y, x) albedo
+    grid, plus `<name>_front`, `_top` and `_side` for its projections.
+    """
+    out = {
+        "scene": cap.scene,
+        "width": cap.width,
+        "bin_resolution": cap.bin_resolution,
+        "z_offset": cap.z_offset,
+        "diffuse": cap.diffuse,
+        "snr": cap.snr,
+        "input_sbr": stats_in["sbr"],
+        "input_ppp": stats_in["ppp"],
+        "window_width_ps": np.asarray(diag["width_ps"]),
+        "window_duty": diag["duty"],
+    }
+    for name, (vol, views) in volumes.items():
+        out[name] = np.ascontiguousarray(vol, dtype=np.float32)
+        for view_name, img in zip(("front", "top", "side"), views):
+            out[f"{name}_{view_name}"] = np.ascontiguousarray(img, dtype=np.float32)
+    if extra:
+        out.update(extra)
+    sio.savemat(path, out, do_compression=True)
+    shape = next(iter(volumes.values()))[0].shape
+    print(f"wrote {path}  ({len(volumes)} volume(s), {shape[0]}x{shape[1]}x{shape[2]})")
 
 
 def main():
@@ -90,6 +131,9 @@ def main():
     ap.add_argument("--snr", type=float, default=None,
                     help="Wiener parameter; defaults to 0.08 with --diffuse, else 0.8")
 
+    ap.add_argument("--aw-only", action="store_true",
+                    help="reconstruct through AW-NLOS alone: no degradation, no "
+                         "traditional-LCT comparison, no scores")
     ap.add_argument("--no-degrade", action="store_true",
                     help="reconstruct the capture as given, without adding noise")
     ap.add_argument("--ppp", type=float, default=60.0, help="target signal PPP")
@@ -102,6 +146,8 @@ def main():
     ap.add_argument("--block", type=int, default=4, help="block size for Eq. 4")
     ap.add_argument("--out", default="results/single",
                     help="output directory")
+    ap.add_argument("--no-mat", action="store_true",
+                    help="write only the PNG, skipping the .mat of the volumes")
     args = ap.parse_args()
 
     snr = args.snr if args.snr is not None else (0.08 if args.diffuse else 0.8)
@@ -130,15 +176,33 @@ def main():
     print(f"  AW window: median {np.median(diag['width_ps']):.0f} ps, "
           f"duty {diag['duty'] * 100:.1f}%")
 
-    v_raw, v_alg = render(cap), render(alg)
+    if args.aw_only:
+        # Nothing to compare against, so no scores: just the reconstruction.
+        vol_alg, views_alg = render(alg)
+        panels = [(views_alg, "AW-NLOS reconstruction", None)]
+        stats = (f"SBR {stats_in['sbr']:.2f}, PPP {stats_in['ppp']:.1f}   |   "
+                 f"window: median {np.median(diag['width_ps']):.0f} ps, "
+                 f"duty {diag['duty'] * 100:.1f}%")
+        path = out / f"{cap.scene}_aw.png"
+        save(panels, f"AW-NLOS - '{cap.scene}'", stats, path)
+        print(f"\nwrote {path}")
+        if not args.no_mat:
+            save_mat(out / f"{cap.scene}_aw.mat",
+                     {"aw_nlos": (vol_alg, views_alg)}, cap, diag, stats_in)
+        print(f"({time.time() - t0:.0f}s)")
+        return
+
+    (vol_raw, v_raw), (vol_alg, v_alg) = render(cap), render(alg)
     ref = v_raw[0]
 
     def score(v):
-        return metrics.ssim(v[0], ref), metrics.psnr(v[0], ref)
+        return f"SSIM {metrics.ssim(v[0], ref):.4f}   PSNR {metrics.psnr(v[0], ref):.1f} dB"
 
+    extra = None
     if args.no_degrade:
-        panels = [(v_raw, "Traditional LCT", None),
+        panels = [(v_raw, "Traditional LCT", "reference"),
                   (v_alg, "AW-NLOS + LCT", score(v_alg))]
+        volumes = {"traditional": (vol_raw, v_raw), "aw_nlos": (vol_alg, v_alg)}
         stats = (f"as given: SBR {stats_in['sbr']:.2f}, PPP {stats_in['ppp']:.1f}   |   "
                  f"window duty {diag['duty'] * 100:.1f}%")
         title = f"AW-NLOS on '{cap.scene}' (no synthetic degradation)"
@@ -146,9 +210,16 @@ def main():
         noisy, info = degrade.degrade(cap, target_sbr=args.sbr, target_ppp=args.ppp,
                                       z_trim=z_trim, seed=args.seed)
         noisy_alg, d_noisy = apply_algorithm(noisy, fwhm_s, args.mu, args.block, z_trim)
-        v_noisy, v_nalg = render(noisy), render(noisy_alg)
+        (vol_noisy, v_noisy), (vol_nalg, v_nalg) = render(noisy), render(noisy_alg)
         sn = metrics.summarize(noisy.data, z_trim)
-        panels = [(v_raw, "Traditional LCT\nraw", None),
+        volumes = {"traditional_raw": (vol_raw, v_raw),
+                   "aw_nlos_raw": (vol_alg, v_alg),
+                   "traditional_noisy": (vol_noisy, v_noisy),
+                   "aw_nlos_noisy": (vol_nalg, v_nalg)}
+        extra = {"degraded_sbr": sn["sbr"], "degraded_ppp": sn["ppp"],
+                 "degrade_alpha": info["alpha"],
+                 "degrade_ambient_rate": info["ambient_rate"]}
+        panels = [(v_raw, "Traditional LCT\nraw", "reference"),
                   (v_alg, "AW-NLOS\nraw", score(v_alg)),
                   (v_noisy, "Traditional LCT\nnoisy", score(v_noisy)),
                   (v_nalg, "AW-NLOS\nnoisy", score(v_nalg))]
@@ -163,11 +234,12 @@ def main():
     save(panels, title, stats, path)
 
     print()
-    for _, label, s in panels:
-        flat = label.replace("\n", " ")
-        print(f"  {flat:<26} " +
-              ("reference" if s is None else f"SSIM {s[0]:.4f}   PSNR {s[1]:.1f} dB"))
-    print(f"\nwrote {path}  ({time.time() - t0:.0f}s)")
+    for _, label, tag in panels:
+        print(f"  {label.replace(chr(10), ' '):<26} {tag}")
+    print(f"\nwrote {path}")
+    if not args.no_mat:
+        save_mat(out / f"{cap.scene}.mat", volumes, cap, diag, stats_in, extra)
+    print(f"({time.time() - t0:.0f}s)")
 
 
 if __name__ == "__main__":
